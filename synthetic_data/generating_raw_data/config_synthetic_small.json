@@ -1,0 +1,16 @@
+{
+  "save_name": "synthetic_dataset",
+  "nb_simulation": 10000,
+  "n_points": 500,
+  "n_support": 10,
+  "n_feature": 6,
+  "f_base": {
+    "min": 2,
+    "max": 5
+  },
+  "f_sin": {
+    "min": 1,
+    "max": 5
+  },
+  "quantile_class": [0.5, 1]
+}
