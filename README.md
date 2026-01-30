@@ -1,7 +1,6 @@
 [WIP]
 
-## Make a conda env
-`conda create --name new_env_name --file environment.txt`
+While the current code in its bare-bones is a correct implementation of TimeSliver, we are actively working to refactor the codebase to a user-friendly version with preprocessed data. 
 
-## In Every folder, please find a README.md file for the respective data
+
 
