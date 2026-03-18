@@ -26,14 +26,14 @@ TimeSliver identifies which time points in a sequence are most important for cla
 │  │ 1. Train     │───▶│ 2. Test      │───▶│ 3. Temporal  │  │
 │  │    Model     │    │    Model     │    │  Attribution │  │
 │  └──────────────┘    └──────────────┘    └──────────────┘  │
-│         │                                       │           │
-│         │                                       ▼           │
-│         │                              ┌──────────────┐     │
-│         │                              │ importance_  │     │
-│         │                              │ {split}.npy  │     │
-│         │                              └──────────────┘     │
-│         │                                       │           │
-│         ▼                                       ▼           │
+│                                                 │           │
+│                                                 ▼           │
+│                                        ┌──────────────┐     │
+│                                        │ importance_  │     │
+│                                        │ {split}.npy  │     │
+│                                        └──────────────┘     │
+│                                                 │           │
+│                                                 ▼           │
 │  ┌──────────────────────────────────────────────────────┐  │
 │  │              MASKED TRAINING (Optional)               │  │
 │  ├──────────────────────────────────────────────────────┤  │
