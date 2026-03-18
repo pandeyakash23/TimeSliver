@@ -19,10 +19,15 @@ from datetime import date
 import time
 import builtins
 from sklearn.metrics import balanced_accuracy_score, confusion_matrix,mean_absolute_error,r2_score, mean_squared_error
-from timesliver import dataset, timesliver_network
+from complor import dataset, complor_network
 
 
 which_data = input('Enter the dataset for which you want to calculate the token importance (train,valid,test):')
+
+# categorical = np.load('./model/categorical_size.npy', allow_pickle=True)
+# categorical = int(categorical)
+
+categorical = 10
 
 ## Dataloader
 batch_size = 1024
@@ -60,59 +65,50 @@ def make_dataset():
     return  test_loader, ohe_valid.shape[0], ohe_valid.shape[1]
 
     
-def initalize():    
+def initalize():  
     init_lr = np.load('./model/init_lr.npy', allow_pickle=True)
-    global rank
-    rank = 'cuda:4'
-    model_dict  =np.load('./model/save_dict.npy', allow_pickle=True).tolist()
-    model = timesliver_network(2,\
-        model_dict['q'],model_dict['d'],model_dict['max_m'],rank)
-    model.load_state_dict(torch.load('./model/best.pth'))
-    # model = torch.load('./model/best.pth')
-    # print(model)
-    # rank = next(model.parameters()).device 
-    model.eval().to(rank) 
+    # init_lr = init_lr[0]
+    model = torch.load('./model/best.pth')
+    rank = next(model.parameters()).device 
+    model.eval().to(rank)   
+    print('Device is',rank)
     print('Number of trainable parameters:', builtins.sum(p.numel() for p in model.parameters()))
-    # criterion = nn.MSELoss()
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=init_lr)
     
     return model, criterion,optimizer
 
 def motif_identification():  
-    
     test_loader, test_size, max_seq_len  = make_dataset()
     model, criterion,optimizer = initalize()
     rank = next(model.parameters()).device 
     store_importance = torch.zeros((test_size, max_seq_len)).to(rank)
     count_test = 0
+    criterion = nn.MSELoss()
     for _, (i_x,sax,i_classes, i_seq, i_actual) in enumerate(test_loader):
         i_x = i_x.to(rank) #.type(dtype=torch.float32)
         sax = sax.to(rank) #.type(dtype=torch.float32)
         i_seq = i_seq.to(rank).type(dtype=torch.float32)
-        # i_classes = i_classes.to(rank)
+        i_classes = i_classes.to(rank)
         i_actual = i_actual.to(rank)
         i_batch = len(i_actual)
-        iter_y_pred, cam,initial_cam,initial_pool = \
+        iter_y_pred, cam,initial_cam,heat_map = \
             model.forward_motif_importance(i_x, sax, i_seq)
-        base_loss = criterion(iter_y_pred, i_actual)
-        
-        # temp_idx = i_actual.to('cpu').tolist()
-        # iter_y_pred = nn.Softmax(dim=-1)(iter_y_pred)[:,temp_idx] ## taking class prob
-        # # iter_y_pred = torch.argmax(iter_y_pred, dim=1)
-        # i_actual = torch.zeros(iter_y_pred.size()).to(rank)
-        # base_loss = criterion(iter_y_pred, i_actual)
-        
+        iter_y_pred = nn.Softmax(dim=-1)(iter_y_pred)
+        iter_y_pred = iter_y_pred[:,i_actual].reshape((-1,))
+        i_actual = torch.zeros(iter_y_pred.shape).to(rank)
+        loss = criterion(iter_y_pred, i_actual)
+
+        # loss = criterion(iter_y_pred, i_actual)
         optimizer.zero_grad()
-        base_loss.backward()
+        loss.backward()
         
         # cam = torch.abs(cam[0])
-        # cam = nn.ReLU()(cam[0])
         cam = cam[0]
+        # cam = nn.ReLU()(cam[0])
         print('Size of the gradient',cam.size())
         
         ## initial_cam
-        
         # initial_cam = torch.abs(initial_cam[0])
         initial_cam = initial_cam[0]
         print('Size of the initial_cam',initial_cam.size())
@@ -125,36 +121,35 @@ def motif_identification():
 
         
         for prot in range(cam.size(0)):
-            cam[prot,...] = cam[prot,...]/abs(torch.max(cam[prot,...])+1E-18)
-            initial_cam[prot,...] = \
-                initial_cam[prot,...]/abs(torch.max(initial_cam[prot,...])+1E-18)
-        #     # initial_pool[prot,...] = \
-        #     #     initial_pool[prot,...]/(torch.max(initial_pool[prot,...])+1E-18)
-        
+            cam[prot,...] = cam[prot,...]/(torch.max(abs(cam[prot,...]))+1E-18)
+            # initial_cam[prot,...] = \
+            #     initial_cam[prot,...]/abs(torch.max(initial_cam[prot,...])+1E-18)
+            # heat_map[prot,...] = \
+            #     heat_map[prot,...]/abs(torch.max(heat_map[prot,...])+1E-18)
+            
             
         for m_i in range(cam.size(-1)):
             mo_level_imp = \
-                model.calculate_motif_level_new(cam[...,m_i], m_i+1, initial_cam)
+                model.calculate_motif_level(cam[...,m_i], m_i+1, initial_cam,None)
             
 
             kernel_size = max_seq_len - mo_level_imp.size(-1) + 1
             store_importance[count_test:count_test+i_batch,...] += model.assigning_importance(mo_level_imp, \
                 kernel_size, max_seq_len)
 
-            head_kernel = kernel_size/torch.arange(1,kernel_size)
-            head_kernel = head_kernel.to(rank)
-            tail_kernel = head_kernel.flip(0)
+            # head_kernel = kernel_size/torch.arange(1,kernel_size)
+            # head_kernel = head_kernel.to(rank)
+            # tail_kernel = head_kernel.flip(0)
             
-            # print(tail_kernel)
+            # # print(tail_kernel)
             
-            store_importance[count_test:count_test+i_batch,0:kernel_size-1] = \
-                store_importance[count_test:count_test+i_batch,0:kernel_size-1]*head_kernel
+            # store_importance[count_test:count_test+i_batch,0:kernel_size-1] = \
+            #     store_importance[count_test:count_test+i_batch,0:kernel_size-1]*head_kernel
             
-            store_importance[count_test:count_test+i_batch,(max_seq_len-kernel_size+1):max_seq_len] = \
-                store_importance[count_test:count_test+i_batch,(max_seq_len-kernel_size+1):max_seq_len]*tail_kernel
+            # store_importance[count_test:count_test+i_batch,(max_seq_len-kernel_size+1):max_seq_len] = \
+            #     store_importance[count_test:count_test+i_batch,(max_seq_len-kernel_size+1):max_seq_len]*tail_kernel
             
-            
-            del mo_level_imp
+            # del mo_level_imp
 
         
         count_test += i_batch
@@ -167,7 +162,7 @@ def motif_identification():
 
         
 if __name__=='__main__':
-    cp_1 = time.time() 
+    cp_1 = time.time()
     motif_identification()
     cp_2 = time.time()
     print('Time Taken',cp_2-cp_1)

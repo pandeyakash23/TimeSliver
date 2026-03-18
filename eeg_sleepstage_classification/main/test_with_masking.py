@@ -1,137 +1,181 @@
-import torch
-import numpy as np
-import math
-from torch.utils.data import Dataset, DataLoader
-from torch.autograd import Variable
-from sklearn.model_selection import train_test_split
-import torch.nn as nn
-import matplotlib.pyplot as plt
-from sklearn import preprocessing
-from sklearn.metrics import r2_score
-import random
-import matplotlib as mpl
-import os
-import gc
-import pandas as pd
-import csv
-from numpy import *
-from torch.utils.tensorboard import SummaryWriter
-from datetime import date
-import time
-import builtins
+"""
+Test the masked TimeSliver model on EEG sleep stage data.
+
+This script evaluates a model that was trained with masked time points.
+
+Usage:
+    python test_with_masking.py --device cuda
+    python test_with_masking.py --top-percent 30  # Override masking percentage
+"""
 import argparse
-from sklearn.metrics import balanced_accuracy_score, confusion_matrix,accuracy_score,roc_auc_score, precision_score, recall_score
-from timesliver import dataset, timesliver_network
+import time
+import numpy as np
+import torch
+import torch.nn as nn
 
-top_per = np.load('./model/top_per.npy', allow_pickle=True).tolist()
-top_per = int(top_per)
-
-
-which_imp = np.load('./model/which_imp.npy', allow_pickle=True).tolist()
-
-if which_imp=='transformer':
-    sub_method= np.load('./model/sub_method.npy', allow_pickle=True).tolist()
-## Dataloader
+import config
+import utils
 
 
-## Dataloader
-batch_size = 256
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Test masked TimeSliver model for EEG sleep stage classification",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "--split",
+        type=str,
+        default="test",
+        choices=["train", "valid", "test"],
+        help="Data split to evaluate on",
+    )
+    parser.add_argument(
+        "--top-percent",
+        type=int,
+        default=None,
+        help="Override masking percentage. Uses saved value if not specified.",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=config.TEST_BATCH_SIZE,
+        help="Batch size for testing",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help="Device to use (cuda, cuda:0, cpu). Auto-detected if not specified.",
+    )
+    parser.add_argument(
+        "--method",
+        type=str,
+        default=None,
+        help="Attribution method. Uses saved value if not specified.",
+    )
+    parser.add_argument(
+        "--sub-method",
+        type=str,
+        default=None,
+        help="Sub-method for transformer/captum. Uses saved value if not specified.",
+    )
+    parser.add_argument(
+        "--model-path",
+        type=str,
+        default=None,
+        help="Path to model. Uses default best_masking.pth if not specified.",
+    )
+    return parser.parse_args()
 
-def masking_function(ohe, seq_len, importance):
-    revised_x  = ohe
-    fea_size = ohe.shape[-1]
-    num_ex = ohe.shape[0]
-    for k in range(num_ex):
-        l = int(seq_len[k])
-        ex_token = np.argsort(importance[k,0:l], axis=-1)
-        ex_token = ex_token[::-1]
-        top_num_token = int(ceil(l*top_per/100))
-        sample_imp = tuple(ex_token[top_num_token:].tolist())
-        corrupt = np.random.normal(0,1,size=(len(sample_imp),fea_size)).tolist()
-        # revised_x[k,sample_imp,:] = corrupt
-        revised_x[k,sample_imp,:] = 0
-    return revised_x  
+
+def load_saved_config():
+    """Load saved masking configuration from training."""
+    config_dict = {}
+
+    try:
+        config_dict["top_percent"] = int(
+            np.load(config.get_config_path("top_per"), allow_pickle=True)
+        )
+    except FileNotFoundError:
+        config_dict["top_percent"] = 100
+
+    try:
+        config_dict["method"] = str(
+            np.load(config.get_config_path("which_imp"), allow_pickle=True)
+        )
+    except FileNotFoundError:
+        config_dict["method"] = "main"
+
+    try:
+        config_dict["sub_method"] = str(
+            np.load(config.get_config_path("sub_method"), allow_pickle=True)
+        )
+    except FileNotFoundError:
+        config_dict["sub_method"] = None
+
+    return config_dict
 
 
-def make_dataset():        
-    path = '../data/'
-        
-    ohe_valid = np.load(f'{path}/x_test.npy', allow_pickle=True)
-    if which_imp != 'transformer':
-        imp_token_valid = np.load(f'../{which_imp}/model/importance_test.npy', allow_pickle=True)
-    else: 
-        imp_token_valid = np.load(f'../{which_imp}/model/importance_test_{sub_method}.npy', allow_pickle=True)
-    sax_valid = np.load('../data//sax_test.npy', allow_pickle=True)
-    
-        
-    classes_valid = np.argmax(ohe_valid, axis=2)
-    output_valid = np.load(f'{path}/y_test.npy', allow_pickle=True)
-    seq_len_valid = np.array([ohe_valid.shape[1]]*len(ohe_valid))
-    if top_per < 100:
-        ohe_valid = masking_function(ohe_valid, seq_len_valid, imp_token_valid) 
-        sax_valid = masking_function(sax_valid, seq_len_valid, imp_token_valid) 
- 
-    test_dataset = dataset(ohe_valid,sax_valid,classes_valid,seq_len_valid,output_valid,ohe_valid.shape[0])
-      
-    test_loader = DataLoader(dataset=test_dataset,
-                            batch_size=batch_size,
-                            shuffle=False)   
-    
-    return test_loader, ohe_valid.shape[0]
-    
-def initalize():
-    
-    model = torch.load('./model/best_masking.pth')
-    rank = next(model.parameters()).device 
-    model.eval().to(rank) 
-    print('Number of trainable parameters:', builtins.sum(p.numel() for p in model.parameters()))
-    criterion = nn.CrossEntropyLoss()
-    
-    return model, criterion
+def load_model(model_path, device):
+    """
+    Load the trained masked model.
 
-def test():
-    test_loader, valid_size  = make_dataset()
-    model, criterion = initalize()
-    rank = next(model.parameters()).device 
-    with torch.no_grad():
-        predicted_label = torch.zeros((valid_size, 1))
-        predicted_prob_class1 = torch.zeros((valid_size, 1))
-        actual_label = torch.zeros((valid_size, 1))
-        count_valid = 0         
-        for j, (i_x,sax, i_classes, i_seq, i_actual) in enumerate(test_loader):
-            i_x = i_x.to(rank) #.type(dtype=torch.float32)
-            sax = sax.to(rank) #.type(dtype=torch.float32)
-            i_seq = i_seq.to(rank).type(dtype=torch.float32)
-            i_classes = i_classes.to(rank)
-            i_actual = i_actual.to(rank)
-            
-           # forward pass     
-            iter_y_pred = model(i_x, sax, i_seq)
-            size = iter_y_pred.size(0)
-            # loss = criterion(iter_y_pred, i_actual)
-            # valid_loss = (valid_loss*j + loss.item())/(j+1)
-            iter_y_pred = nn.Softmax(dim=1)(iter_y_pred)
-            predicted_prob_class1[count_valid:count_valid+size, 0] = iter_y_pred[:,1]
-            iter_y_pred = torch.argmax(iter_y_pred, dim=1)
-            predicted_label[count_valid:count_valid+size, 0] = iter_y_pred 
-            actual_label[count_valid:count_valid+size, 0] = i_actual
-            count_valid += size
-        
-        predicted_label = predicted_label.cpu().numpy().reshape((-1,1))
-        predicted_prob_class1 = predicted_prob_class1.cpu().numpy().reshape((-1,1))
-        actual_label = actual_label.cpu().numpy().reshape((-1,1))
-        valid_acc = accuracy_score(actual_label, predicted_label)
-        print(f'Test accuracy is: {valid_acc}')
-        print(confusion_matrix(actual_label, predicted_label))
-        # print('AUCROC score', roc_auc_score(actual_label, predicted_prob_class1))
-        # np.save('./model/predicted_label', predicted_label)
-        # print('Precision score', precision_score(actual_label, predicted_label))
-        # print('Recall score', recall_score(actual_label, predicted_label))
-        
+    Args:
+        model_path: Path to the model checkpoint
+        device: Device to load model on
 
-        
-if __name__=='__main__':
-    cp_1 = time.time()
-    test()
-    cp_2 = time.time()
-    print('Time Taken',cp_2-cp_1)
+    Returns:
+        Loaded model in eval mode
+    """
+    model = torch.load(model_path, map_location=device)
+    model = model.to(device)
+    model.eval()
+
+    print(f"Model loaded with {utils.count_parameters(model):,} parameters")
+
+    return model
+
+
+def test(args):
+    """
+    Run model evaluation with masking.
+
+    Args:
+        args: Parsed command line arguments
+    """
+    device = config.get_device(args.device)
+    print(f"Testing on device: {device}")
+
+    # Load saved configuration
+    saved_config = load_saved_config()
+
+    # Use command line args if provided, otherwise use saved config
+    top_percent = args.top_percent or saved_config["top_percent"]
+    method = args.method or saved_config["method"]
+    sub_method = args.sub_method or saved_config["sub_method"]
+
+    print(f"Masking configuration:")
+    print(f"  Top percent: {top_percent}%")
+    print(f"  Method: {method}")
+    if sub_method:
+        print(f"  Sub-method: {sub_method}")
+
+    # Load model
+    model_path = args.model_path or config.get_model_path("best_masking")
+    print(f"\nLoading model from: {model_path}")
+    model = load_model(model_path, device)
+
+    # Load masked test data
+    print(f"\nLoading masked {args.split} data...")
+    test_loader, test_data = utils.create_masked_dataloader(
+        args.split,
+        args.batch_size,
+        top_percent,
+        method=method,
+        sub_method=sub_method,
+        shuffle=False,
+    )
+    print(f"Samples: {test_data['n_samples']}")
+
+    # Evaluate
+    print("\nEvaluating...")
+    results = utils.evaluate_model(model, test_loader, device, test_data["n_samples"])
+
+    # Print results
+    utils.print_metrics(results, split_name=f"{args.split.capitalize()} (masked)")
+
+
+def main():
+    """Main entry point."""
+    args = parse_args()
+
+    start_time = time.time()
+    test(args)
+    elapsed = time.time() - start_time
+
+    print(f"\nTotal time: {elapsed:.2f}s")
+
+
+if __name__ == "__main__":
+    main()

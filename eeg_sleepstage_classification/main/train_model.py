@@ -1,168 +1,221 @@
-import torch
-import numpy as np
-import math
-from torch.utils.data import Dataset, DataLoader
-from torch.autograd import Variable
-from sklearn.model_selection import train_test_split
-import torch.nn as nn
-import matplotlib.pyplot as plt
-from sklearn import preprocessing
-from sklearn.metrics import r2_score
-import random
-import matplotlib as mpl
-import os
-import gc
-import pandas as pd
-import csv
-from numpy import *
-from torch.utils.tensorboard import SummaryWriter
-from datetime import date
-import time
-import builtins
+"""
+Train the TimeSliver model on EEG sleep stage data.
+
+Usage:
+    python train_model.py --epochs 2500 --lr 0.001 --device cuda
+"""
 import argparse
-from sklearn.metrics import balanced_accuracy_score, confusion_matrix,mean_absolute_error, accuracy_score
-from timesliver import dataset, timesliver_network
+import time
+import numpy as np
+import torch
+import torch.nn as nn
+
+# TensorBoard is optional due to potential TensorFlow/numpy conflicts
+try:
+    from torch.utils.tensorboard import SummaryWriter
+    HAS_TENSORBOARD = True
+except (ImportError, AttributeError):
+    HAS_TENSORBOARD = False
+    print("Warning: TensorBoard not available, logging disabled")
+
+import config
+import utils
+from timesliver import TimeSliverNetwork
 
 
-writer = SummaryWriter(f"Training starting on:{date.today()}")
-writer = SummaryWriter(comment="TimeSliver model")
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Train TimeSliver model for EEG sleep stage classification",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=config.TRAIN_EPOCHS,
+        help="Number of training epochs",
+    )
+    parser.add_argument(
+        "--lr",
+        type=float,
+        default=config.TRAIN_LR,
+        help="Learning rate",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=config.TRAIN_BATCH_SIZE,
+        help="Batch size for training",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help="Device to use (cuda, cuda:0, cpu). Auto-detected if not specified.",
+    )
+    parser.add_argument(
+        "--d-model",
+        type=int,
+        default=config.D_MODEL,
+        help="Model dimension (q)",
+    )
+    parser.add_argument(
+        "--d-out",
+        type=int,
+        default=config.D_OUT,
+        help="Output dimension for CNN layers (d)",
+    )
+    parser.add_argument(
+        "--max-m",
+        type=int,
+        default=config.MAX_M,
+        help="Number of motif scales",
+    )
+    parser.add_argument(
+        "--tensorboard",
+        action="store_true",
+        default=True,
+        help="Enable TensorBoard logging",
+    )
+    parser.add_argument(
+        "--no-tensorboard",
+        action="store_false",
+        dest="tensorboard",
+        help="Disable TensorBoard logging",
+    )
+    return parser.parse_args()
 
-parser = argparse.ArgumentParser(description='TimeSliver')
-parser.add_argument('--num_epochs', default=2500, type=int,
-                    metavar='N',
-                    )
-parser.add_argument('--device', default='cuda', type=str
-                    )
-parser.add_argument('--categorical', default=10, type=int
-                    )
 
-args = parser.parse_args()
-num_epochs = args.num_epochs
-device = args.device
-categorical = args.categorical
+def create_model(d_model, d_out, max_m, device):
+    """
+    Create and initialize the TimeSliver model.
 
-np.save('./model/categorical_size', categorical)
-## Dataloader
-batch_size = 512
+    Args:
+        d_model: Model dimension
+        d_out: Output dimension for CNN
+        max_m: Number of motif scales
+        device: Device to run on
 
-def make_dataset():        
-    ohe = np.load('../data/x_train.npy', allow_pickle=True)
-    classes = np.argmax(ohe, axis=2)
-    output = np.load('../data//y_train.npy', allow_pickle=True)
-    seq_len = np.array([ohe.shape[1]]*len(ohe))
-    sax_train = np.load(f'../data//sax_train.npy', allow_pickle=True)
-    
-    global q
-    q = ohe.shape[-1]
- 
-    train_dataset = dataset(ohe,sax_train,classes,seq_len,output,ohe.shape[0])    
-        
-    ohe_valid = np.load('../data//x_valid.npy', allow_pickle=True)
-    classes_valid = np.argmax(ohe_valid, axis=2)
-    output_valid = np.load('../data//y_valid.npy', allow_pickle=True)
-    seq_len_valid = np.array([ohe_valid.shape[1]]*len(ohe_valid))
-    sax_valid = np.load(f'../data//sax_valid.npy', allow_pickle=True)
-    
- 
-    test_dataset = dataset(ohe_valid,sax_valid,classes_valid,seq_len_valid,output_valid,ohe_valid.shape[0])
+    Returns:
+        Tuple of (model, criterion)
+    """
+    model = TimeSliverNetwork(
+        num_classes=config.NUM_CLASSES,
+        d_model=d_model,
+        d_out=d_out,
+        max_m=max_m,
+        device=device,
+    ).to(device)
 
-    train_loader = DataLoader(dataset=train_dataset,
-                            batch_size=batch_size,
-                            shuffle=True)  
-      
-    test_loader = DataLoader(dataset=test_dataset,
-                            batch_size=batch_size,
-                            shuffle=False)   
-    
-    return train_loader, test_loader, ohe_valid.shape[0]
+    print(f"Model created with {utils.count_parameters(model):,} trainable parameters")
 
-
-    
-def initalize(rank, max_m, init_lr):
-    q = 32
-    d = 12
-    num_classes = 5 ## one property prediction
-    model = timesliver_network(num_classes, q,d,max_m,rank).to(rank)     
-    print('Number of trainable parameters:', builtins.sum(p.numel() for p in model.parameters()))
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=init_lr)
-    
-    ## saving q,d,max_m for later use
-    save_dict = {'num_classes':num_classes,'q':q, 'd':d, 'max_m':max_m}
-    np.save('./model/save_dict.npy', save_dict) 
-    
-    return model, criterion, optimizer
 
-## Training loop
-def train(num_epochs, init_lr, max_m):
-    rank = device
-    train_loader, valid_loader, valid_size  = make_dataset()
-    model, criterion, optimizer = initalize(rank, max_m, init_lr)
-    start_from = 0
-    largest_acc = 0
-    for epoch in range(num_epochs):
-        avg_loss = 0
-        for i, (i_x,sax,i_classes, i_seq, i_actual) in enumerate(train_loader):
-            i_x = i_x.to(rank) #.type(dtype=torch.float32)
-            sax = sax.to(rank) #.type(dtype=torch.float32)
-            i_seq = i_seq.to(rank).type(dtype=torch.float32)
-            i_classes = i_classes.to(rank)
-            i_actual = i_actual.to(rank)
-            
-            # forward pass    
-            iter_y_pred = model(i_x, sax, i_seq) ## get the output in [batch, seq_len, feature_size]
-            loss = criterion(iter_y_pred, i_actual)
-            avg_loss = (avg_loss*i + loss.item())/(i+1)
+    return model, criterion
 
-            # backward pass
+
+def train(args):
+    """
+    Main training loop.
+
+    Args:
+        args: Parsed command line arguments
+    """
+    device = config.get_device(args.device)
+    print(f"Training on device: {device}")
+
+    # Load data
+    print("Loading training data...")
+    train_loader, train_data = utils.create_dataloader(
+        "train", args.batch_size, shuffle=True
+    )
+    valid_loader, valid_data = utils.create_dataloader(
+        "valid", args.batch_size, shuffle=False
+    )
+
+    print(f"Training samples: {train_data['n_samples']}")
+    print(f"Validation samples: {valid_data['n_samples']}")
+
+    # Save configuration
+    utils.save_model_config(config.NUM_CLASSES, args.d_model, args.d_out, args.max_m)
+    np.save(config.get_config_path("init_lr"), args.lr)
+    np.save(config.get_config_path("categorical_size"), args.d_model)
+
+    # Create model
+    model, criterion = create_model(args.d_model, args.d_out, args.max_m, device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+
+    # TensorBoard
+    writer = None
+    if args.tensorboard and HAS_TENSORBOARD:
+        writer = SummaryWriter(comment=f"TimeSliver_EEG_lr{args.lr}_epochs{args.epochs}")
+
+    # Training loop
+    best_valid_acc = 0.0
+    print(f"\nStarting training for {args.epochs} epochs...")
+
+    for epoch in range(args.epochs):
+        model.train()
+        avg_loss = 0.0
+
+        for i, (x, sax, classes, seq_len, labels) in enumerate(train_loader):
+            x = x.to(device)
+            sax = sax.to(device)
+            seq_len = seq_len.to(device).float()
+            labels = labels.to(device)
+
+            # Forward pass
+            logits = model(x, sax, seq_len)
+            loss = criterion(logits, labels)
+            avg_loss = (avg_loss * i + loss.item()) / (i + 1)
+
+            # Backward pass
             optimizer.zero_grad()
             loss.backward()
-            optimizer.step()   
+            optimizer.step()
 
-        with torch.no_grad():
-            predicted_label = torch.zeros((valid_size, 1))
-            actual_label = torch.zeros((valid_size, 1))
-            count_valid = 0       
-            valid_loss = 0  
-            for j, (i_x, sax, i_classes, i_seq, i_actual) in enumerate(valid_loader):
-                i_x = i_x.to(rank) #.type(dtype=torch.float32)
-                sax = sax.to(rank) #.type(dtype=torch.float32)
-                i_seq = i_seq.to(rank).type(dtype=torch.float32)
-                i_classes = i_classes.to(rank)
-                i_actual = i_actual.to(rank)
-                
-                # forward pass     
-                iter_y_pred = model(i_x, sax, i_seq)
-                loss = criterion(iter_y_pred, i_actual)
-                valid_loss = (valid_loss*j + loss.item())/(j+1)
-                iter_y_pred = nn.Softmax(dim=1)(iter_y_pred)
-                iter_y_pred = torch.argmax(iter_y_pred, dim=1)
-                size = iter_y_pred.size(0)
-                predicted_label[count_valid:count_valid+size, 0] = iter_y_pred 
-                actual_label[count_valid:count_valid+size, 0] = i_actual
-                count_valid += size
-            
-            predicted_label = predicted_label.cpu().numpy().reshape((-1,1))
-            actual_label = actual_label.cpu().numpy().reshape((-1,1))
-            valid_acc = accuracy_score(actual_label, predicted_label)
-            
-                    
-        writer.add_scalar("Cross entropy Loss per epoch/train", avg_loss, epoch+1+start_from)
-        writer.add_scalar("Acc  per epoch/valid", valid_acc, epoch+1+start_from)
-        # writer.add_scalar("Cross entropy per epoch/valid", valid_loss, epoch+1+start_from)
-        
-        if valid_acc >= largest_acc:
-            torch.save(model.state_dict(), f'./model/best.pth')
-            # torch.save(model, f'./model/best.pth')
-            largest_acc = valid_acc
-            
-        
-if __name__=='__main__':
-    cp_1 = time.time()
-    init_lr = 0.001
-    np.save('./model/init_lr', init_lr)
-    max_m = int(1)
-    ##change
-    train(num_epochs, init_lr, max_m)
-    cp_2 = time.time()
-    print('Time Taken',cp_2-cp_1)
+        # Validation
+        results = utils.evaluate_model(
+            model, valid_loader, device, valid_data["n_samples"]
+        )
+        valid_acc = results["accuracy"]
+
+        # Logging
+        if writer:
+            writer.add_scalar("Loss/train", avg_loss, epoch + 1)
+            writer.add_scalar("Accuracy/valid", valid_acc, epoch + 1)
+
+        # Save best model
+        if valid_acc >= best_valid_acc:
+            torch.save(model.state_dict(), config.get_model_path("best"))
+            best_valid_acc = valid_acc
+
+        # Print progress every 100 epochs
+        if (epoch + 1) % 100 == 0 or epoch == 0:
+            print(
+                f"Epoch {epoch+1:5d}/{args.epochs} | "
+                f"Loss: {avg_loss:.4f} | "
+                f"Valid Acc: {valid_acc:.4f} | "
+                f"Best: {best_valid_acc:.4f}"
+            )
+
+    if writer:
+        writer.close()
+
+    print(f"\nTraining complete! Best validation accuracy: {best_valid_acc:.4f}")
+    print(f"Model saved to: {config.get_model_path('best')}")
+
+
+def main():
+    """Main entry point."""
+    args = parse_args()
+
+    start_time = time.time()
+    train(args)
+    elapsed = time.time() - start_time
+
+    print(f"Total training time: {elapsed:.2f}s ({elapsed/60:.2f}min)")
+
+
+if __name__ == "__main__":
+    main()

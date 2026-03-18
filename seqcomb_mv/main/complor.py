@@ -45,7 +45,7 @@ class dataset(Dataset) :
 
 class PositionalEncoding(nn.Module):
 
-    def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 1000):
+    def __init__(self, d_model: int, dropout: float = 0.05, max_len: int = 18000):
         super().__init__()
         self.dropout = nn.Dropout(p=dropout)
 
@@ -90,62 +90,61 @@ def extract(grad):
         # return grad
         cam.append(grad)
           
-class timesliver_network(nn.Module):
+class complor_network(nn.Module):
     def __init__(self, num_classes, d_model, d_out, max_m, rank):
-        super(timesliver_network, self).__init__()
+        super(complor_network, self).__init__()
         self.max_m = max_m
         self.rank = rank
         self.d_in = d_model
         self.d_model = d_model ## equivalent to q
         self.d_out = d_out ## equivalent to d
-        sax_alpha = 90
+        sax_alpha = 20
         # self.d
 
         ##n layers
         self.proj = nn.Linear(self.d_in, self.d_model)
         # cnn layers   
         self.positional_encoding = PositionalEncoding(self.d_model)
-        self.cnn1 = nn.Sequential( nn.Conv1d(self.d_model,16,3, stride=1), 
+        self.cnn1 = nn.Sequential( nn.Conv1d(self.d_model,16,2, stride=1), 
+                                   nn.ReLU(),
+                                   nn.Conv1d(16,32,2, stride=1),
+                                   nn.ReLU(),
+                                   nn.Conv1d(32,int(self.d_out),2, stride=1)
+                                   ) ##8 size motifs
+        self.ln1 = nn.LayerNorm(self.d_out)
+        self.cnn2 = nn.Sequential( nn.Conv1d(self.d_model,16,3, stride=1), 
                                    nn.ReLU(),
                                    nn.Conv1d(16,32,3, stride=1),
                                    nn.ReLU(),
                                    nn.Conv1d(32,int(self.d_out),3, stride=1)
                                    ) ##8 size motifs
-        self.ln1 = nn.LayerNorm(self.d_out)
-        
-        # self.cnn2 = nn.Sequential( nn.Conv1d(self.d_model,16,1, stride=1), 
-        #                            nn.ReLU(),
-        #                            nn.Conv1d(16,32,1, stride=1),
-        #                            nn.ReLU(),
-        #                            nn.Conv1d(32,int(self.d_out),1, stride=1)
-        #                            ) ##16 size motifs
-        # self.ln2 = nn.LayerNorm(self.d_out)
-               
-        
+        self.ln2 = nn.LayerNorm(self.d_out)
+
         self.ln4 = nn.LayerNorm(sax_alpha)
         
-        self.maxpool1 = nn.Sequential( nn.AvgPool1d(3, stride=1),
+        self.maxpool1 = nn.Sequential( nn.AvgPool1d(2, stride=1),
+                                       nn.AvgPool1d(2, stride=1),
+                                       nn.AvgPool1d(2, stride=1),
+                                   )
+        
+        self.maxpool2 = nn.Sequential( nn.AvgPool1d(3, stride=1),
                                        nn.AvgPool1d(3, stride=1),
                                        nn.AvgPool1d(3, stride=1),
                                    )
-        # self.pool_linear = nn.Linear(self.d_model, )
+
         
-        self.maxpool2 = nn.Sequential( nn.AvgPool1d(1, stride=1),
-                                       nn.AvgPool1d(1, stride=1),
-                                       nn.AvgPool1d(1, stride=1),
-                                   )
+        self.motif_size_1 = 4*1
+        self.motif_size_2 = 7*1
+
         
-        self.motif_size_1 = 7*1
-        self.motif_size_2 = 6*1
-        
-        self.reduction = nn.Sequential(nn.AvgPool2d((2,2), stride=(2,2)),
-                                       nn.AvgPool2d((2,2), stride=(2,2)),
-                                       nn.AvgPool2d((1,2), stride=(1,2))
+        self.reduction = nn.Sequential(nn.AvgPool3d((2,1,2), stride=(2,1,2)),
+                                    #    nn.AvgPool2d((2,2), stride=(2,2)),
+                                    #    nn.AvgPool2d((2,1), stride=(2,1))
                                        )
         
         self.nn = nn.Sequential(
                                 # nn.Linear(int(sax_alpha*self.d_out*self.max_m),num_classes),
-                                nn.Linear(int(9*11*self.max_m),num_classes),
+                                nn.Linear(int(720*self.max_m),num_classes),
                                 # nn.ReLU(),
                                 # nn.Linear(32,8),
                                 # nn.ReLU(),
@@ -159,10 +158,10 @@ class timesliver_network(nn.Module):
         mo_size = getattr(self, f'motif_size_{m}')
         
         q =  cnn_net(out) ##[N,f,L]  
-        # q = torch.permute(ln_net(torch.permute(q,(0,2,1))),(0,2,1))
+        q = torch.permute(ln_net(torch.permute(q,(0,2,1))),(0,2,1))
         
         store_q = q
-        
+       
         ## changing pooling
         d = pool_net(sax)*mo_size ## [N,f,L]
         
@@ -179,29 +178,28 @@ class timesliver_network(nn.Module):
     def forward(self, x, sax, seq_len):
         'x: [batch, seq_len, feature], classes: [N,L]'
         
-        # out = self.proj(x)
-        out = x
+        out = self.proj(x)
         
-        # out = self.positional_encoding(out.permute(1,0,2),self.rank) ##[L,N,f]        
-        # out = out.permute(1,2,0)
+        out = self.positional_encoding(out.permute(1,0,2),self.rank) ##[L,N,f]        
+        out = out.permute(1,2,0)
         
-        out = torch.permute(out,(0,2,1)) ## making it (N, f, L)
+        # out = torch.permute(out,(0,2,1)) ## making it (N, f, L)
         sax = sax.permute(0,2,1)
         
         _,_,out_1 = self.make_p(out, sax,seq_len,1)
-        # _,_,out_2 = self.make_p(out, sax,seq_len,2)
+        _,_,out_2 = self.make_p(out, sax,seq_len,2)
         
-        # heat_map = torch.cat((out_1, out_2), dim=3)      
-        heat_map = out_1
+        heat_map = torch.cat((out_1, out_2), dim=3)      
+        # heat_map = out_1
         # heat_map = nn.Softmax(dim=1)(heat_map)
         
         heat_map = heat_map.permute(0,2,3,1)
-        
         # heat_map = self.ln4(heat_map)
         # print('Before', heat_map.size())
         # heat_map = heat_map.squeeze()
-        heat_map = heat_map[:,:,0,:]
-        heat_map = self.reduction(heat_map)        
+        heat_map = self.reduction(heat_map)
+        
+        
         heat_map = nn.Flatten()(heat_map) ## removing amino acid contribution from heat map as there are none        
         heat_map = self.nn(heat_map)
         
@@ -224,41 +222,10 @@ class timesliver_network(nn.Module):
         
         windowed_view = np.lib.stride_tricks.sliding_window_view(temp, n)
         
-        return windowed_view.sum(axis=1)     
+        return windowed_view.sum(axis=1)   
     
-    # def calculate_motif_level_new(self,dp,m_i, initial_cam,q_imp, d_imp):
-    #     d_comp = getattr(self, f'pool_{m_i}') #self.pool_1[:,q,:]
-    #     q_comp = getattr(self, f'out_{m_i}')
-    #     m_size = initial_cam.size(1)-(d_comp.size(-1)-1)
-    
-    #     total = d_comp.size(0)
-    #     max_len = d_comp.size(-1)
-    #     q_id = q_comp.size(1)
-    #     d_id = d_comp.size(1)
-        
-    #     all_motif_importance = torch.zeros((total, max_len)).to(self.rank)
-    #     temp = torch.zeros((d_comp.size(-1))).to(self.rank)
-    #     for i in range(q_id): # i is related to size of latent rep
-    #         for j in range(d_id): # j in related to num of categorical var
-    #             for prot in range(total): # prot defines the protein number in a batch
-    #                 var_imp = dp[prot,j,i].unsqueeze(-1)
-                    
-    #                 q_yp = initial_cam[prot,i,:].squeeze()
-    #                 l = int(self.seq_len[prot])
-                    
-    #                 if var_imp > 0:
-    #                     # temp[:] = nn.ReLU()(d_comp[prot,j,0:l]*q_comp[prot,i,0:l]*q_yp) # taking abs because the magnitude matters
-    #                     temp[:] = nn.ReLU()(d_comp[prot,j,0:l]*q_comp[prot,i,0:l]) # taking abs because the magnitude matters
-    #                 else:
-    #                     # temp[:] = nn.ReLU()(-d_comp[prot,j,0:l]*q_comp[prot,i,0:l]*q_yp) # taking abs because the magnitude matters
-    #                     temp[:] = nn.ReLU()(-d_comp[prot,j,0:l]*q_comp[prot,i,0:l]) # taking abs because the magnitude matters
-                        
-    #                 temp[:] = (temp)/(torch.max(temp)+1E-18)
-    #                 all_motif_importance[prot,0:l] += temp*abs(var_imp)
-
-    #     return all_motif_importance
     @torch.no_grad()
-    def calculate_motif_level_new(self,dp,m_i, initial_cam):
+    def calculate_motif_level(self,dp,m_i, initial_cam,P):
         d_comp = getattr(self, f'pool_{m_i}') #self.pool_1[:,q,:]
         q_comp = getattr(self, f'out_{m_i}')
         m_size = initial_cam.size(1)-(d_comp.size(-1)-1)
@@ -276,33 +243,24 @@ class timesliver_network(nn.Module):
         for i in range(q_id): # i is related to size of latent rep
             for j in range(d_id): # j in related to num of categorical var
                 # for prot in range(total): # prot defines the protein number in a batch
-                    var_imp[:,:] = dp[:,j,i].unsqueeze(-1)
+                    # var_imp[:,:] = (P[:,j,i]*dp[:,j,i]).unsqueeze(-1)
+                    var_imp[:,:] = (dp[:,j,i]).unsqueeze(-1)
                     signs[:,:] = torch.sign(var_imp)
                     
                     
                     temp[:,:] = nn.ReLU()(signs*d_comp[:,j,:]*q_comp[:,i,:])
-                    # temp[:,:] = torch.abs(signs*d_comp[:,j,:]*q_comp[:,i,:])
-                    # temp[:,:] = nn.ReLU()(signs*d_comp[:,j,:]*q_comp[:,i,:]*q_comp[:,i,:])
-                    
-                    # if var_imp > 0:
-                    #     # temp[:] = nn.ReLU()(d_comp[prot,j,0:l]*q_comp[prot,i,0:l]*q_yp) # taking abs because the magnitude matters
-                    #     temp[:,:] = nn.ReLU()(d_comp[:,j,:]*q_comp[:,i,:]) # taking abs because the magnitude matters
-                    # else:
-                    #     # temp[:] = nn.ReLU()(-d_comp[prot,j,0:l]*q_comp[prot,i,0:l]*q_yp) # taking abs because the magnitude matters
-                    #     temp[:,:] = nn.ReLU()(-d_comp[:,j,:]*q_comp[:,i,:]) # taking abs because the magnitude matters
-                    
-                    max_val_prot[:,0] = torch.max(temp, dim=1)[0].squeeze()
-                    temp[:,:] = (temp)/(max_val_prot+1E-18)
-                    all_motif_importance += temp*abs(var_imp)
-            
-                    # del var_imp , signs
-                    # torch.cuda.empty_cache()
-                    # gc.collect()
-                    # print('DOne')
+                    # temp[:,:] = nn.Tanh()(signs*d_comp[:,j,:]*q_comp[:,i,:])
+                    # temp[:,:] = d_comp[:,j,:]*q_comp[:,i,:]
+                    # temp[:,:] = d_comp[:,j,:]*q_comp[:,i,:]
+                    # temp_sum = torch.sum(temp, dim=1).unsqueeze(-1)
+                    # temp = temp/(temp_sum+1E-18)
+
+                    # max_val_prot[:,0] = torch.max(abs(temp), dim=1)[0].squeeze()
+                    # temp[:,:] = (temp)/(max_val_prot+1E-18)                  
+                    all_motif_importance += temp*abs(var_imp)                
+                    # all_motif_importance += temp*var_imp    
 
         return all_motif_importance
-    
-    
     
     def forward_motif_importance(self, x,  sax, seq_len):
         'x: [batch, seq_len, feature], classes: [N,L]'
@@ -317,19 +275,22 @@ class timesliver_network(nn.Module):
         # self.importance =  importance
         # self.overall_imp_segments = overall_imp_segments
 
-        # out = self.proj(x)
-        out = x
-        out = torch.permute(out,(0,2,1)) ## making it (N, f, L)
+        out = self.proj(x)
+        
+        out = self.positional_encoding(out.permute(1,0,2),self.rank) ##[L,N,f]        
+        out = out.permute(1,2,0)
+        
+        # out = torch.permute(out,(0,2,1)) ## making it (N, f, L)
         sax = sax.permute(0,2,1)
         
         self.out_1, self.pool_1,p_1 = self.make_p(out, sax,seq_len,1)
         self.out_1.register_hook(initial_q)
         # self.pool_1.register_hook(initial_d)
         
-        # self.out_2, self.pool_2,p_2 = self.make_p(out, sax,seq_len,2)
+        self.out_2, self.pool_2,p_2 = self.make_p(out, sax,seq_len,2)
         
-        # heat_map = torch.cat((p_1, p_2), dim=3)    
-        heat_map = p_1
+        heat_map = torch.cat((p_1, p_2), dim=3)    
+        # heat_map = p_1
         heat_map.register_hook(extract)
     
         heat_map = heat_map.permute(0,2,3,1)  
@@ -337,7 +298,6 @@ class timesliver_network(nn.Module):
         # heat_map = self.ln4(heat_map) 
         
         # heat_map = heat_map.squeeze()
-        heat_map = heat_map[:,:,0,:]
         heat_map = self.reduction(heat_map)
           
         heat_map = nn.Flatten()(heat_map) ## removing amino acid contribution from heat map as there are none        
